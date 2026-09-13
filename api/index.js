@@ -1,86 +1,133 @@
-// GitHub projeniz için tam çalışan ve logolu/linkli kanal çekme ve listeleme yapısı
-async function fetchAndParsePlaylist() {
-    const container = document.getElementById('channelsSelectList');
-    container.innerHTML = "<p style='text-align:center; color:#71717a; font-size:13px; padding:10px;'>Kanallar yükleniyor...</p>";
-    
-    try {
-        // Dilerseniz buradaki listeyi kendi kaynaklarınızla dilediğiniz gibi genişletebilirsiniz.
-        // Her kanalın kendi adı, gerçek .m3u8 stream linki ve logo adresi burada tanımlanır.
-        let channels = [
-            { 
-                name: "Bein Sports 1 HD", 
-                streamUrl: "https://hls.livetvuk.com/bein1/index.m3u8", 
-                logo: "https://upload.wikimedia.org/wikipedia/tr/3/36/BeIN_Sports_1_logo.png" 
-            },
-            { 
-                name: "Bein Sports 2 HD", 
-                streamUrl: "https://hls.livetvuk.com/bein2/index.m3u8", 
-                logo: "https://upload.wikimedia.org/wikipedia/tr/3/36/BeIN_Sports_1_logo.png" 
-            },
-            { 
-                name: "Bein Sports 3 HD", 
-                streamUrl: "https://hls.livetvuk.com/bein3/index.m3u8", 
-                logo: "https://upload.wikimedia.org/wikipedia/tr/3/36/BeIN_Sports_1_logo.png" 
-            },
-            { 
-                name: "S Sport 1 HD", 
-                streamUrl: "https://hls.livetvuk.com/ssport1/index.m3u8", 
-                logo: "https://upload.wikimedia.org/wikipedia/commons/e/e6/S_Sport_logo.png" 
-            },
-            { 
-                name: "S Sport 2 HD", 
-                streamUrl: "https://hls.livetvuk.com/ssport2/index.m3u8", 
-                logo: "https://upload.wikimedia.org/wikipedia/commons/e/e6/S_Sport_logo.png" 
-            },
-            { 
-                name: "Exxen Spor HD", 
-                streamUrl: "https://hls.livetvuk.com/exxenspor/index.m3u8", 
-                logo: "https://upload.wikimedia.org/wikipedia/commons/2/22/Exxen_logo.svg" 
-            },
-            { 
-                name: "TRT Spor HD", 
-                streamUrl: "https://tv-trtspor.medya.trt.com.tr/master.m3u8", 
-                logo: "https://upload.wikimedia.org/wikipedia/commons/9/9e/TRT_Spor_logo_2019.png" 
-            },
-            { 
-                name: "TV8 HD", 
-                streamUrl: "https://tv8-live.daioncdn.net/tv8/tv8.m3u8", 
-                logo: "https://upload.wikimedia.org/wikipedia/commons/b/b5/TV8_Logo_2013.png" 
-            }
-        ];
+const axios = require('axios');
+const cheerio = require('cheerio');
 
-        fetchedChannelsCache = channels;
-        renderChannelSelectionList(fetchedChannelsCache);
+module.exports = async (req, res) => {
+    // CORS Başlıkları (Mobil uygulamadan ve dışarıdan erişim izni)
+    res.setHeader('Access-Control-Allow-Credentials', true);
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET,OPTIONS');
+    res.setHeader(
+        'Access-Control-Allow-Headers',
+        'X-CSRF-Token, X-Requested-With, Accept, Accept-Version, Content-Length, Content-MD5, Content-Type, Date, X-Api-Version'
+    );
 
-    } catch (e) {
-        console.error(e);
-        container.innerHTML = "<p style='text-align:center; color:#ff2a2a; font-size:13px; padding:10px;'>Kanallar yüklenemedi.</p>";
-    }
-}
-
-function renderChannelSelectionList(channels) {
-    const container = document.getElementById('channelsSelectList');
-    container.innerHTML = "";
-    
-    if (channels.length === 0) {
-        container.innerHTML = "<p style='text-align:center; color:#71717a; font-size:13px; padding:10px;'>Kanal bulunamadı.</p>";
+    if (req.method === 'OPTIONS') {
+        res.status(200).end();
         return;
     }
 
-    channels.forEach((ch, index) => {
-        const item = document.createElement('div');
-        item.className = 'channel-option-item';
-        // Logoların düzgün görünmesi için görsel alanı eklendi
-        item.innerHTML = `
-            <img src="${ch.logo}" style="width:32px; height:32px; object-fit:contain; background:#27272d; border-radius:8px; padding:3px;" onerror="this.style.display='none'">
-            <div class="channel-option-name">${ch.name}</div>
-        `;
-        item.addEventListener('click', () => {
-            document.querySelectorAll('.channel-option-item').forEach(el => el.classList.remove('selected'));
-            item.classList.add('selected');
-            // Video player için gerekli streamUrl ve kanal bilgileri buraya aktarılır
-            selectedChannelData = { id: index, name: ch.name, streamUrl: ch.streamUrl, logo: ch.logo };
+    const TARGET_DOMAIN = 'https://izle.livetvuk.com/';
+    const HEADERS = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Referer': `${TARGET_DOMAIN}/`,
+        'Origin': TARGET_DOMAIN,
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+        'Accept-Language': 'tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7'
+    };
+
+    // YAYIN LİNKİ AYIKLAMA FONKSİYONU (Yedekli Pattern Matching)
+    function extractStreamUrl(htmlContent) {
+        const streamPatterns = [
+            /(https?:\/\/[^\s"'<>]+\.m3u8[^\s"'<>]*)/i,                  // Standart M3U8 linki
+            /file:\s*["'](https?:\/\/[^\s"'<>]+\.m3u8[^"']*)["']/i,       // Player içindeki file: "..." kalıbı
+            /source\s*:\s*["'](https?:\/\/[^\s"'<>]+\.m3u8[^"']*)["']/i,     // Player içindeki source: "..." kalıbı
+            /(https?:\/\/[^\s"'<>]+\.mp4[^\s"'<>]*)/i                    // MP4 yedek format
+        ];
+
+        for (let pattern of streamPatterns) {
+            let match = htmlContent.match(pattern);
+            if (match) {
+                // Öncelik yakalanan grupta (match[1]), yoksa eşleşmenin tamamında (match[0])
+                return match[1] || match[0];
+            }
+        }
+        return null;
+    }
+
+    try {
+        // 1. OYNATICI VEYA M3U8 LINKI AYIKLAMA (İzle butonuna basıldığında çalışır)
+        if (req.query.getStream && req.query.url) {
+            const pageUrl = req.query.url;
+            
+            // Maçın detay sayfasını çekiyoruz
+            const matchPage = await axios.get(pageUrl, { headers: HEADERS });
+            const html = matchPage.data;
+
+            // A) Ana Sayfada Yedekli Kalıplarla Yayın Arama
+            let streamUrl = extractStreamUrl(html);
+            if (streamUrl) {
+                return res.status(200).json({ basarili: true, streamUrl: streamUrl, type: 'm3u8' });
+            }
+
+            // B) Ana sayfada bulunamazsa Player Iframe adresini tespit et
+            const $page = cheerio.load(html);
+            let iframeSrc = $page('iframe').attr('src');
+
+            if (!iframeSrc) {
+                const iframeMatch = html.match(/<iframe[^>]+src=["']([^"']+)["']/i);
+                if (iframeMatch) iframeSrc = iframeMatch[1];
+            }
+
+            if (iframeSrc) {
+                if (iframeSrc.startsWith('//')) iframeSrc = 'https:' + iframeSrc;
+                else if (iframeSrc.startsWith('/')) iframeSrc = TARGET_DOMAIN + iframeSrc;
+
+                // DERİN TARAMA: Iframe'in içine girip yayın adresini orada ara
+                try {
+                    const iframePage = await axios.get(iframeSrc, {
+                        headers: {
+                            ...HEADERS,
+                            'Referer': pageUrl
+                        }
+                    });
+                    const iframeHtml = iframePage.data;
+                    let innerStreamUrl = extractStreamUrl(iframeHtml);
+                    
+                    if (innerStreamUrl) {
+                        return res.status(200).json({ basarili: true, streamUrl: innerStreamUrl, type: 'm3u8' });
+                    }
+                } catch (e) {
+                    // Iframe içeriğine erişilemezse güvenli yedek olarak iframe adresini ver
+                }
+
+                return res.status(200).json({ basarili: true, streamUrl: iframeSrc, type: 'iframe' });
+            }
+
+            return res.status(200).json({ basarili: false, message: 'Yayın adresi veya player bulunamadı.' });
+        }
+
+        // 2. ANA MAÇ LİSTESİNİ ÇEKME (Bozulmayan Orijinal Yapı)
+        const { data } = await axios.get(TARGET_DOMAIN, { headers: HEADERS });
+        const $ = cheerio.load(data);
+        const maclar = [];
+
+        $('a[href*="/mac-izle/"]').each((i, element) => {
+            const title = $(element).text().trim();
+const pageUrl = $(element).attr('href');
+            
+            const timeMatch = title.match(/\d{2}:\d{2}/);
+            const time = timeMatch ? timeMatch[0] : 'CANLI';
+
+            if (title && pageUrl) {
+                maclar.push({
+                    title: title.replace(/\s+/g, ' '),
+                    time: time,
+                    pageUrl: pageUrl.startsWith('http') ? pageUrl : `${TARGET_DOMAIN}${pageUrl}`
+                });
+            }
         });
-        container.appendChild(item);
-    });
-}
+
+        res.status(200).json({
+            basarili: true,
+            toplam: maclar.length,
+            maclar: maclar
+        });
+
+    } catch (error) {
+        res.status(500).json({
+            basarili: false,
+            hata: error.message
+        });
+    }
+};
+
